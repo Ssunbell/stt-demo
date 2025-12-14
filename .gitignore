@@ -240,7 +240,7 @@ build/
 # Misc
 .DS_Store
 *.pem
-*.json
+telos*.json
 
 # Debug logs
 npm-debug.log*
