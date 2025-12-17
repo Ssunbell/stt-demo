@@ -77,7 +77,10 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                     chunk_count += 1
                     # Log every 20 chunks for better visibility
                     if chunk_count % 20 == 0:
-                        print(f"🎵 Received {chunk_count} audio chunks ({len(data)} bytes)", flush=True)
+                        print(
+                            f"🎵 Received {chunk_count} audio chunks ({len(data)} bytes)",
+                            flush=True,
+                        )
                 else:
                     # Empty data signals end
                     audio_queue.put(None)
@@ -110,25 +113,28 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                     )
                     continue
 
-                # Send transcription result (all treated as streaming)
+                # Send both interim and final results
+                is_final = result.get("original_is_final", result["is_final"])
+                timestamp_str = time.strftime("%H:%M:%S")
+
                 message = {
                     "type": "transcript",
                     "transcript": result["transcript"],
-                    "is_final": result["is_final"],
+                    "is_final": is_final,
                     "timestamp": result["timestamp"],
                 }
 
-                # Add confidence if available
+                # Add confidence if available (usually only for final results)
                 if "confidence" in result:
                     message["confidence"] = result["confidence"]
 
-                # Send immediately
+                # Send to client
                 await websocket.send_json(message)
-                
-                # Simplified logging
-                log_time = time.strftime("%H:%M:%S.%f")[:-3]
-                text_length = len(result['transcript'])
-                print(f"[{log_time}] 📤 → 클라이언트 전송 ({text_length}자)", flush=True)
+
+                # Logging
+                marker = "✅" if is_final else "💬"
+                status = "final" if is_final else "interim"
+                print(f"[{timestamp_str}] {marker} → 클라이언트 전송 ({status}): {result['transcript'][:50]}", flush=True)
 
         except Exception as e:
             print(f"❌ Error in send_transcripts: {e}")

@@ -22,11 +22,15 @@ load_dotenv()
 # Project settings
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "telos-7b2f6")
 LOCATION = os.getenv("STT_LOCATION", "asia-northeast1")
-MODEL = os.getenv("STT_MODEL", "chirp_3")
+MODEL = os.getenv(
+    "STT_MODEL", "chirp_3"
+)  # chirp_2 is faster than chirp_3 for interim results
 
 # Audio settings
-SAMPLE_RATE = 16000
-CHUNK_SIZE = int(SAMPLE_RATE / 10)  # 100ms chunks
+# Sample rate for STT - must match client (Google recommends 16kHz or higher)
+INPUT_SAMPLE_RATE = 16000
+# 100ms frame size (Best Practice: "A 100-millisecond frame size is recommended")
+CHUNK_SIZE = int(INPUT_SAMPLE_RATE / 10)  # 1600 samples = 100ms at 16kHz
 STREAMING_LIMIT = 240000  # 4 minutes in milliseconds
 
 # Language settings
@@ -70,13 +74,13 @@ class STTStreamingService:
         self.restart_counter = 0
         self.last_transcript_was_final = False
         self.new_stream = True
-        
+
         print(f"\n{'#'*80}", flush=True)
         print(f"🎙️  STT Service initialized:")
         print(f"   - Model: {MODEL}")
         print(f"   - Location: {LOCATION}")
         print(f"   - Language: {', '.join(LANGUAGE_CODES)}")
-        print(f"   - Audio: LINEAR16, 48kHz, Mono")
+        print(f"   - Audio: LINEAR16, 16kHz, Mono")
         print(f"   - Interim results: Enabled (real-time)")
         print(f"   - Voice activity events: Enabled")
         print(f"{'#'*80}\n", flush=True)
@@ -88,11 +92,12 @@ class STTStreamingService:
         Returns:
             StreamingRecognizeRequest with configuration
         """
-        # Use explicit decoding for LINEAR16 PCM audio at 48kHz (browser default)
+        # Use explicit decoding for LINEAR16 PCM audio
+        # Best Practice: "Use the native rate of the audio source"
         recognition_config = cloud_speech_types.RecognitionConfig(
             explicit_decoding_config=cloud_speech_types.ExplicitDecodingConfig(
                 encoding=cloud_speech_types.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=48000,  # Browser AudioContext default
+                sample_rate_hertz=INPUT_SAMPLE_RATE,  # Must match client (16kHz)
                 audio_channel_count=1,
             ),
             language_codes=LANGUAGE_CODES,
@@ -152,10 +157,13 @@ class STTStreamingService:
                         break
 
                     chunk_count += 1
-                    # Log every 20 chunks for better visibility  
+                    # Log every 20 chunks for better visibility
                     if chunk_count % 20 == 0:
-                        print(f"📤 Sent {chunk_count} audio chunks to Google Cloud", flush=True)
-                    
+                        print(
+                            f"📤 Sent {chunk_count} audio chunks to Google Cloud",
+                            flush=True,
+                        )
+
                     yield cloud_speech_types.StreamingRecognizeRequest(
                         audio=audio_chunk
                     )
@@ -164,7 +172,9 @@ class STTStreamingService:
                     # Continue waiting for more audio
                     empty_count += 1
                     if empty_count % 100 == 0:
-                        print(f"⏸️ Queue empty for {empty_count * 0.1:.1f}s, waiting for audio...")
+                        print(
+                            f"⏸️ Queue empty for {empty_count * 0.1:.1f}s, waiting for audio..."
+                        )
                     continue
 
         except Exception as e:
@@ -198,10 +208,10 @@ class STTStreamingService:
         try:
             # Start streaming recognition (blocking call, run in executor)
             loop = asyncio.get_event_loop()
-            
+
             # Use a queue to get responses in real-time
             response_queue = asyncio.Queue()
-            
+
             def process_responses():
                 """Process Google Cloud responses in a separate thread."""
                 try:
@@ -218,24 +228,27 @@ class STTStreamingService:
                     # Check if it's a normal termination error
                     if "OutOfRange" in error_msg or "stream ended" in error_msg.lower():
                         print("🔚 Stream ended by client")
-                    elif "encoding" in error_msg.lower() or "audio data" in error_msg.lower():
-                        print(f"⚠️ Audio encoding issue (likely due to early termination): {error_msg[:100]}")
+                    elif (
+                        "encoding" in error_msg.lower()
+                        or "audio data" in error_msg.lower()
+                    ):
+                        print(
+                            f"⚠️ Audio encoding issue (likely due to early termination): {error_msg[:100]}"
+                        )
                     else:
                         print(f"❌ Error in process_responses: {e}")
                 finally:
                     # Always signal completion
-                    asyncio.run_coroutine_threadsafe(
-                        response_queue.put(None), loop
-                    )
-            
+                    asyncio.run_coroutine_threadsafe(response_queue.put(None), loop)
+
             # Start processing in background thread
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             executor.submit(process_responses)
-            
+
             # Process responses as they arrive
             while True:
                 response = await response_queue.get()
-                
+
                 if response is None:
                     break
                 # Check if we need to restart the stream (4-minute limit)
@@ -258,15 +271,12 @@ class STTStreamingService:
                 # Use elapsed time since session start
                 current_time = get_current_time()
                 elapsed_time = current_time - self.start_time
-                
-                corrected_time = (
-                    elapsed_time
-                    + (STREAMING_LIMIT * self.restart_counter)
-                )
+
+                corrected_time = elapsed_time + (STREAMING_LIMIT * self.restart_counter)
 
                 # Show all results in real-time without final distinction
                 timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                
+
                 # Always treat as interim for continuous updates
                 original_is_final = result.is_final
                 result_data = {
@@ -279,11 +289,11 @@ class STTStreamingService:
                 # Add confidence score if available
                 if result.alternatives[0].confidence:
                     result_data["confidence"] = result.alternatives[0].confidence
-                
+
                 # Print all results as they come
                 marker = "✅" if original_is_final else "💬"
                 print(f"[{timestamp}] {marker} 실시간 텍스트: {transcript}", flush=True)
-                
+
                 self.last_transcript_was_final = original_is_final
 
                 # Yield immediately for real-time processing
