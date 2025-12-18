@@ -97,57 +97,88 @@ async def websocket_stt_endpoint(websocket: WebSocket):
 
     async def send_transcripts():
         """Process audio through STT and send results to client."""
-        try:
-            async for result in stt_service.stream_recognize(audio_queue):
-                if not receiving:
-                    break
+        nonlocal stt_service
+        restart_count = 0
+        max_restarts = 100  # Allow up to 100 restarts (500 minutes total)
+        
+        while receiving and restart_count < max_restarts:
+            try:
+                print(f"\n🔄 Starting STT stream (session {restart_count + 1})")
+                
+                async for result in stt_service.stream_recognize(audio_queue):
+                    if not receiving:
+                        break
 
-                # Check if it's an error
-                if "error" in result:
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "message": result["error"],
-                            "timestamp": result.get("timestamp", 0),
-                        }
-                    )
+                    # Check if it's an error
+                    if "error" in result:
+                        error_msg = result.get("error", "")
+                        # Check if it's the 5-minute limit error
+                        if "5 minutes" in error_msg or "Max duration" in error_msg:
+                            print(f"\n⚠️ Stream limit reached, will restart...")
+                            break  # Break to restart
+                        
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": error_msg,
+                                "timestamp": result.get("timestamp", 0),
+                            }
+                        )
+                        continue
+
+                    # Send both interim and final results
+                    is_final = result.get("is_final", False)
+                    timestamp_str = time.strftime("%H:%M:%S")
+
+                    message = {
+                        "type": "transcript",
+                        "transcript": result["transcript"],
+                        "is_final": is_final,
+                        "timestamp": result["timestamp"],
+                    }
+
+                    # Add confidence if available (usually only for final results)
+                    if "confidence" in result:
+                        message["confidence"] = result["confidence"]
+
+                    # Send to client
+                    await websocket.send_json(message)
+
+                    # Logging
+                    marker = "✅" if is_final else "💬"
+                    status = "final" if is_final else "interim"
+                    print(f"[{timestamp_str}] {marker} → 클라이언트 전송 ({status}): {result['transcript'][:50]}", flush=True)
+
+                # Stream ended, check if we should restart
+                if receiving:
+                    restart_count += 1
+                    print(f"\n🔄 Restarting STT stream (attempt {restart_count})...")
+                    stt_service = STTStreamingService()  # Create new service instance
+                    await asyncio.sleep(0.1)  # Brief pause before restart
+                    
+            except Exception as e:
+                error_str = str(e)
+                print(f"❌ Error in send_transcripts: {e}")
+                
+                # Check if it's a restart-able error
+                if "5 minutes" in error_str or "Max duration" in error_str:
+                    restart_count += 1
+                    print(f"\n🔄 Restarting after timeout (attempt {restart_count})...")
+                    stt_service = STTStreamingService()
+                    await asyncio.sleep(0.1)
                     continue
-
-                # Send both interim and final results
-                is_final = result.get("original_is_final", result["is_final"])
-                timestamp_str = time.strftime("%H:%M:%S")
-
-                message = {
-                    "type": "transcript",
-                    "transcript": result["transcript"],
-                    "is_final": is_final,
-                    "timestamp": result["timestamp"],
-                }
-
-                # Add confidence if available (usually only for final results)
-                if "confidence" in result:
-                    message["confidence"] = result["confidence"]
-
-                # Send to client
-                await websocket.send_json(message)
-
-                # Logging
-                marker = "✅" if is_final else "💬"
-                status = "final" if is_final else "interim"
-                print(f"[{timestamp_str}] {marker} → 클라이언트 전송 ({status}): {result['transcript'][:50]}", flush=True)
-
-        except Exception as e:
-            print(f"❌ Error in send_transcripts: {e}")
-            if receiving:
-                try:
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "message": str(e),
-                        }
-                    )
-                except Exception:
-                    pass
+                
+                if receiving:
+                    try:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": str(e),
+                            }
+                        )
+                    except Exception:
+                        pass
+                break  # Exit on non-restartable errors
 
     # Run both tasks concurrently
     try:

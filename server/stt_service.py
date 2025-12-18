@@ -24,12 +24,12 @@ PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "telos-7b2f6")
 LOCATION = os.getenv("STT_LOCATION", "asia-northeast1")
 MODEL = os.getenv(
     "STT_MODEL", "chirp_3"
-)  # chirp_2 is faster than chirp_3 for interim results
+)  # "long" is fastest for streaming interim results (supports Korean)
 
 # Audio settings
 # Sample rate for STT - must match client (Google recommends 16kHz or higher)
 INPUT_SAMPLE_RATE = 16000
-# 100ms frame size (Best Practice: "A 100-millisecond frame size is recommended")
+# 100ms frame size (Google recommended for optimal latency/efficiency balance)
 CHUNK_SIZE = int(INPUT_SAMPLE_RATE / 10)  # 1600 samples = 100ms at 16kHz
 STREAMING_LIMIT = 240000  # 4 minutes in milliseconds
 
@@ -93,26 +93,22 @@ class STTStreamingService:
             StreamingRecognizeRequest with configuration
         """
         # Use explicit decoding for LINEAR16 PCM audio
-        # Best Practice: "Use the native rate of the audio source"
         recognition_config = cloud_speech_types.RecognitionConfig(
             explicit_decoding_config=cloud_speech_types.ExplicitDecodingConfig(
                 encoding=cloud_speech_types.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=INPUT_SAMPLE_RATE,  # Must match client (16kHz)
+                sample_rate_hertz=INPUT_SAMPLE_RATE,
                 audio_channel_count=1,
             ),
             language_codes=LANGUAGE_CODES,
             model=MODEL,
         )
 
+        # Streaming config with interim_results and voice activity events
         streaming_config = cloud_speech_types.StreamingRecognitionConfig(
             config=recognition_config,
             streaming_features=cloud_speech_types.StreamingRecognitionFeatures(
                 interim_results=True,
-                enable_voice_activity_events=True,  # Get more frequent updates
-                voice_activity_timeout=cloud_speech_types.StreamingRecognitionFeatures.VoiceActivityTimeout(
-                    speech_start_timeout=None,  # No timeout for speech start
-                    speech_end_timeout=None,  # No timeout for speech end
-                ),
+                enable_voice_activity_events=True,
             ),
         )
 
@@ -149,7 +145,7 @@ class STTStreamingService:
             while True:
                 try:
                     # Get audio chunk from queue (non-blocking with timeout)
-                    audio_chunk = audio_queue.get(timeout=0.1)
+                    audio_chunk = audio_queue.get(timeout=0.05)
 
                     if audio_chunk is None:
                         # None signals end of stream
@@ -277,13 +273,11 @@ class STTStreamingService:
                 # Show all results in real-time without final distinction
                 timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-                # Always treat as interim for continuous updates
-                original_is_final = result.is_final
+                # Return actual is_final status from Google
                 result_data = {
                     "transcript": transcript,
-                    "is_final": False,  # Force all as interim for continuous display
+                    "is_final": result.is_final,
                     "timestamp": corrected_time,
-                    "original_is_final": original_is_final,  # Keep for reference
                 }
 
                 # Add confidence score if available
@@ -291,10 +285,10 @@ class STTStreamingService:
                     result_data["confidence"] = result.alternatives[0].confidence
 
                 # Print all results as they come
-                marker = "✅" if original_is_final else "💬"
+                marker = "✅" if result.is_final else "💬"
                 print(f"[{timestamp}] {marker} 실시간 텍스트: {transcript}", flush=True)
 
-                self.last_transcript_was_final = original_is_final
+                self.last_transcript_was_final = result.is_final
 
                 # Yield immediately for real-time processing
                 yield result_data
