@@ -25,6 +25,10 @@ export default function AudioRecorder({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const recordingStartTimeRef = useRef<number>(0);
+  const lastResponseTimeRef = useRef<number>(0);
+  const speechStartTimeRef = useRef<number>(0);  // When user started speaking (first non-silent audio)
+  const hasSpeechRef = useRef<boolean>(false);
 
   // Clean up function
   const cleanup = () => {
@@ -109,20 +113,48 @@ export default function AudioRecorder({
       };
 
       ws.onmessage = (event) => {
+        const receiveTime = performance.now();
+        
         try {
           const data = JSON.parse(event.data);
 
           if (data.type === "transcript") {
+            // Calculate latency based on interim results
+            // For interim: time since last interim (or recording start if first)
+            // For final: time since last interim
+            let latencyMs: number;
+            
+            if (lastResponseTimeRef.current === 0) {
+              // First response: measure from recording start
+              latencyMs = Math.round(receiveTime - recordingStartTimeRef.current);
+            } else {
+              // Subsequent: measure from last response
+              latencyMs = Math.round(receiveTime - lastResponseTimeRef.current);
+            }
+            
+            // Only update lastResponseTime for interim results (to measure interim-to-interim interval)
+            if (!data.is_final) {
+              lastResponseTimeRef.current = receiveTime;
+            }
+            
+            // Reset tracking after final result for next phrase
+            if (data.is_final) {
+              hasSpeechRef.current = false;
+              speechStartTimeRef.current = 0;
+              lastResponseTimeRef.current = 0;  // Reset so next phrase measures from recording
+            }
+            
             const now = new Date().toLocaleTimeString('ko-KR', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
             const prefix = data.is_final ? '✅ FINAL' : '💬 interim';
-            console.log(`[${now}] ${prefix}: "${data.transcript}"`);
+            console.log(`[${now}] ${prefix}: "${data.transcript}" (⏱️ ${latencyMs}ms)`);
             
-            const transcript: TranscriptItem = {
+            const transcript: TranscriptItem & { latencyMs: number } = {
               id: `${data.timestamp}-${Math.random()}`,
               text: data.transcript,
               isFinal: data.is_final,
               timestamp: data.timestamp,
               confidence: data.confidence,
+              latencyMs: latencyMs,
             };
             
             // Update UI immediately
@@ -164,9 +196,32 @@ export default function AudioRecorder({
     }
   };
 
+  // Resample audio from source sample rate to target sample rate (16000Hz)
+  const resampleAudio = (inputData: Float32Array, fromRate: number, toRate: number): Float32Array => {
+    if (fromRate === toRate) {
+      return inputData;
+    }
+    
+    const ratio = fromRate / toRate;
+    const outputLength = Math.floor(inputData.length / ratio);
+    const output = new Float32Array(outputLength);
+    
+    for (let i = 0; i < outputLength; i++) {
+      const srcIndex = i * ratio;
+      const srcIndexFloor = Math.floor(srcIndex);
+      const srcIndexCeil = Math.min(srcIndexFloor + 1, inputData.length - 1);
+      const t = srcIndex - srcIndexFloor;
+      
+      // Linear interpolation
+      output[i] = inputData[srcIndexFloor] * (1 - t) + inputData[srcIndexCeil] * t;
+    }
+    
+    return output;
+  };
+
   const startMediaRecorder = async (stream: MediaStream) => {
     try {
-      // Create AudioContext for PCM audio processing (use browser's default sample rate)
+      // Create AudioContext (browser uses system default sample rate)
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
       
@@ -175,21 +230,19 @@ export default function AudioRecorder({
         await audioContext.resume();
       }
       
-      const actualSampleRate = audioContext.sampleRate;
-      console.log(`🎤 AudioContext state: ${audioContext.state}, sample rate: ${actualSampleRate}Hz`);
-      
-      if (actualSampleRate !== SAMPLE_RATE) {
-        console.warn(`⚠️ Using ${actualSampleRate}Hz instead of requested ${SAMPLE_RATE}Hz. Audio will be resampled on server.`);
-      }
+      const browserSampleRate = audioContext.sampleRate;
+      console.log(`🎤 AudioContext state: ${audioContext.state}, browser sample rate: ${browserSampleRate}Hz`);
+      console.log(`🎤 Will resample to ${SAMPLE_RATE}Hz for server`);
       
       const source = audioContext.createMediaStreamSource(stream);
       
-      // Create ScriptProcessor with smaller buffer (2048) for more frequent updates
-      // This sends audio chunks more often to get faster interim results
-      const processor = audioContext.createScriptProcessor(2048, 1, 1);
+      // Create ScriptProcessor with buffer size adjusted for resampling
+      // Use larger buffer (4096) to ensure smooth resampling
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
       
       let audioChunkCount = 0;
       let firstChunk = true;
+      
       processor.onaudioprocess = (e) => {
         if (firstChunk) {
           console.log("🎵 First audio chunk received, starting to send data");
@@ -199,21 +252,36 @@ export default function AudioRecorder({
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0);
           
+          // Resample from browser's sample rate to 16000Hz
+          const resampledData = resampleAudio(inputData, browserSampleRate, SAMPLE_RATE);
+          
           // Convert Float32Array to Int16Array (LINEAR16 PCM)
-          const pcmData = new Int16Array(inputData.length);
-          for (let i = 0; i < inputData.length; i++) {
+          const pcmData = new Int16Array(resampledData.length);
+          for (let i = 0; i < resampledData.length; i++) {
             // Clamp to [-1, 1] and convert to 16-bit integer
-            const s = Math.max(-1, Math.min(1, inputData[i]));
+            const s = Math.max(-1, Math.min(1, resampledData[i]));
             pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
           }
           
-          // Send PCM data as binary
-          wsRef.current.send(pcmData.buffer);
+          // Convert Int16Array to Uint8Array for proper byte transmission
+          // (recommended by Google STT documentation)
+          const byteArray = new Uint8Array(pcmData.buffer);
+          
+          // Detect speech start (simple energy-based detection)
+          const energy = resampledData.reduce((sum, sample) => sum + Math.abs(sample), 0) / resampledData.length;
+          if (energy > 0.01 && !hasSpeechRef.current) {
+            hasSpeechRef.current = true;
+            speechStartTimeRef.current = performance.now();
+            console.log(`🗣️ Speech detected! Energy: ${energy.toFixed(4)}`);
+          }
+          
+          // Send PCM data as Uint8Array (byte array)
+          wsRef.current.send(byteArray);
           
           audioChunkCount++;
-          // Log every 20 chunks (about every 200ms at 2048 samples) for better visibility
+          // Log every 20 chunks for visibility
           if (audioChunkCount % 20 === 0) {
-            console.log(`🎵 Sent ${audioChunkCount} audio chunks (${pcmData.length * 2} bytes each)`);
+            console.log(`🎵 Sent ${audioChunkCount} chunks (${pcmData.length} samples @ ${SAMPLE_RATE}Hz)`);
           }
         } else if (wsRef.current) {
           console.warn(`⚠️ WebSocket not open: ${wsRef.current.readyState}`);
@@ -228,8 +296,12 @@ export default function AudioRecorder({
       
       setIsRecording(true);
       onStatusChange("recording");
+      recordingStartTimeRef.current = performance.now();
+      lastResponseTimeRef.current = 0;  // Reset for first response measurement
+      hasSpeechRef.current = false;
+      speechStartTimeRef.current = 0;
       
-      console.log("🎤 Recording started with AudioContext");
+      console.log(`🎤 Recording started: ${browserSampleRate}Hz → ${SAMPLE_RATE}Hz resampling`);
     } catch (error) {
       console.error("❌ Error starting AudioContext:", error);
       onError("오디오 처리 시작 실패");

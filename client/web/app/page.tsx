@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import AudioRecorder from "@/components/AudioRecorder";
 import TranscriptView from "@/components/TranscriptView";
 import StatusIndicator from "@/components/StatusIndicator";
+import LatencyStats, { LatencyData } from "@/components/LatencyStats";
 
 export type TranscriptItem = {
   id: string;
@@ -15,27 +16,82 @@ export type TranscriptItem = {
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "recording" | "error";
 
+const initialLatencyStats: LatencyData = {
+  firstResponseMs: null,
+  lastResponseMs: null,
+  avgResponseMs: 0,
+  minResponseMs: Infinity,
+  maxResponseMs: 0,
+  totalResponses: 0,
+  interimCount: 0,
+  finalCount: 0,
+};
+
 export default function Home() {
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
+  const [currentInterim, setCurrentInterim] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
+  const [latencyStats, setLatencyStats] = useState<LatencyData>(initialLatencyStats);
+  const recordingStartTimeRef = useRef<number | null>(null);
+  const latencySamplesRef = useRef<number[]>([]);
 
-  const handleTranscriptUpdate = (transcript: TranscriptItem) => {
-    console.log(`📝 실시간 텍스트: "${transcript.text}"`);
+  const handleTranscriptUpdate = useCallback((transcript: TranscriptItem & { latencyMs?: number }) => {
+    const prefix = transcript.isFinal ? '✅' : '💬';
+    console.log(`${prefix} 실시간: "${transcript.text}"`);
     
-    setTranscripts((prev) => {
-      // Always add new transcript to accumulate all updates
-      console.log(`  → 새 텍스트 추가 (총 ${prev.length + 1}개)`);
-      return [...prev, transcript];
-    });
-  };
+    // Update latency stats if latency is provided
+    if (transcript.latencyMs !== undefined) {
+      const latency = transcript.latencyMs;
+      latencySamplesRef.current.push(latency);
+      
+      setLatencyStats(prev => {
+        const newTotal = prev.totalResponses + 1;
+        const samples = latencySamplesRef.current;
+        const avgMs = samples.reduce((a, b) => a + b, 0) / samples.length;
+        
+        return {
+          firstResponseMs: prev.firstResponseMs === null ? latency : prev.firstResponseMs,
+          lastResponseMs: latency,
+          avgResponseMs: avgMs,
+          minResponseMs: Math.min(prev.minResponseMs === Infinity ? latency : prev.minResponseMs, latency),
+          maxResponseMs: Math.max(prev.maxResponseMs, latency),
+          totalResponses: newTotal,
+          interimCount: prev.interimCount + (transcript.isFinal ? 0 : 1),
+          finalCount: prev.finalCount + (transcript.isFinal ? 1 : 0),
+        };
+      });
+    }
+    
+    if (transcript.isFinal) {
+      // Final: add to transcripts list and clear interim
+      setTranscripts((prev) => [...prev, transcript]);
+      setCurrentInterim(null);
+    } else {
+      // Interim: just update the current interim text (no accumulation)
+      setCurrentInterim(transcript.text);
+    }
+  }, []);
 
-  const handleStatusChange = (newStatus: ConnectionStatus) => {
+  const handleStatusChange = useCallback((newStatus: ConnectionStatus) => {
     setStatus(newStatus);
     if (newStatus !== "error") {
       setError(null);
     }
-  };
+    
+    // Reset latency stats when starting recording
+    if (newStatus === "recording") {
+      recordingStartTimeRef.current = Date.now();
+      latencySamplesRef.current = [];
+      setLatencyStats(initialLatencyStats);
+      setCurrentInterim(null);
+    }
+    
+    // Clear interim when disconnected
+    if (newStatus === "disconnected") {
+      setCurrentInterim(null);
+    }
+  }, []);
 
   const handleError = (errorMessage: string) => {
     setError(errorMessage);
@@ -88,24 +144,19 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* Info */}
+              {/* Latency Stats */}
               <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
-                <h3 className="text-sm font-semibold mb-2 text-gray-700 dark:text-gray-300">
-                  사용 방법
-                </h3>
-                <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-                  <li>• 녹음 시작 버튼 클릭</li>
-                  <li>• 마이크에 대고 말하기</li>
-                  <li>• 실시간으로 텍스트 변환 확인</li>
-                  <li>• 녹음 중지로 종료</li>
-                </ul>
+                <LatencyStats 
+                  stats={latencyStats} 
+                  isRecording={status === "recording"} 
+                />
               </div>
             </div>
           </div>
 
           {/* Transcript View */}
           <div className="lg:col-span-2">
-            <TranscriptView transcripts={transcripts} />
+            <TranscriptView transcripts={transcripts} currentInterim={currentInterim} />
           </div>
         </div>
 

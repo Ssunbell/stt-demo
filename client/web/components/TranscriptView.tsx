@@ -7,9 +7,10 @@ import type { TranscriptItem } from "@/app/page";
 
 interface TranscriptViewProps {
   transcripts: TranscriptItem[];
+  currentInterim?: string | null;
 }
 
-export default function TranscriptView({ transcripts }: TranscriptViewProps) {
+export default function TranscriptView({ transcripts, currentInterim }: TranscriptViewProps) {
   const [copied, setCopied] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -79,36 +80,53 @@ export default function TranscriptView({ transcripts }: TranscriptViewProps) {
         ref={scrollRef}
         className="flex-1 overflow-y-auto space-y-3 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-600"
       >
-        {transcripts.length === 0 ? (
+        {transcripts.length === 0 && !currentInterim ? (
           <div className="h-full flex items-center justify-center text-gray-400">
             <p className="text-center">
               녹음을 시작하면 여기에 텍스트가 표시됩니다.
             </p>
           </div>
         ) : (
-          transcripts.map((transcript) => (
-            <div
-              key={transcript.id}
-              className="p-4 rounded-lg border-l-4 transition-all bg-blue-50 dark:bg-blue-900/20 border-blue-500 animate-pulse"
-            >
-              <div className="flex justify-between items-start mb-2">
-                <span className="text-xs font-medium px-2 py-1 rounded bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200">
-                  🎤 실시간 인식 중
-                </span>
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  {formatTimestamp(transcript.timestamp)}
-                </span>
-              </div>
-              <p className="text-lg leading-relaxed text-gray-900 dark:text-white font-medium">
-                {transcript.text}
-              </p>
-              {transcript.confidence && (
-                <div className="mt-2 text-xs text-gray-500">
-                  신뢰도: {(transcript.confidence * 100).toFixed(0)}%
+          <>
+            {/* Final transcripts */}
+            {transcripts.map((transcript) => (
+              <div
+                key={transcript.id}
+                className="p-4 rounded-lg border-l-4 bg-green-50 dark:bg-green-900/20 border-green-500"
+              >
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-medium px-2 py-1 rounded bg-green-200 dark:bg-green-800 text-green-800 dark:text-green-200">
+                    ✅ 확정
+                  </span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    {formatTimestamp(transcript.timestamp)}
+                  </span>
                 </div>
-              )}
-            </div>
-          ))
+                <p className="text-lg leading-relaxed text-gray-900 dark:text-white font-medium">
+                  {transcript.text}
+                </p>
+                {transcript.confidence && (
+                  <div className="mt-2 text-xs text-gray-500">
+                    신뢰도: {(transcript.confidence * 100).toFixed(0)}%
+                  </div>
+                )}
+              </div>
+            ))}
+            
+            {/* Current interim (only one, always updating) */}
+            {currentInterim && (
+              <div className="p-4 rounded-lg border-l-4 bg-blue-50 dark:bg-blue-900/20 border-blue-500 animate-pulse">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-medium px-2 py-1 rounded bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200">
+                    🎤 인식 중...
+                  </span>
+                </div>
+                <p className="text-lg leading-relaxed text-gray-900 dark:text-white font-medium">
+                  {currentInterim}
+                </p>
+              </div>
+            )}
+          </>
         )}
       </div>
 
