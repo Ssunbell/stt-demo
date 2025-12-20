@@ -7,10 +7,7 @@ import queue
 import time
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from stt_service import STTStreamingService
-from stt_service_v1 import STTStreamingServiceV1
 from translation_service import TranslationService
-from stt_service_multimodal import MultimodalSTTService
-from stt_service_gemini_live import GeminiLiveSTTService
 
 # Create router
 router = APIRouter()
