@@ -9,6 +9,7 @@ import LatencyStats, { LatencyData } from "@/components/LatencyStats";
 export type TranscriptItem = {
   id: string;
   text: string;
+  translation?: string;
   isFinal: boolean;
   timestamp: number;
   confidence?: number;
@@ -29,7 +30,7 @@ const initialLatencyStats: LatencyData = {
 
 export default function Home() {
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
-  const [currentInterim, setCurrentInterim] = useState<string | null>(null);
+  const [currentInterim, setCurrentInterim] = useState<{ text: string; translation?: string } | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [latencyStats, setLatencyStats] = useState<LatencyData>(initialLatencyStats);
@@ -68,8 +69,8 @@ export default function Home() {
       setTranscripts((prev) => [...prev, transcript]);
       setCurrentInterim(null);
     } else {
-      // Interim: just update the current interim text (no accumulation)
-      setCurrentInterim(transcript.text);
+      // Interim: update current interim text and translation
+      setCurrentInterim({ text: transcript.text, translation: transcript.translation });
     }
   }, []);
 

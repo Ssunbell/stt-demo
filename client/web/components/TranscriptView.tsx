@@ -7,7 +7,7 @@ import type { TranscriptItem } from "@/app/page";
 
 interface TranscriptViewProps {
   transcripts: TranscriptItem[];
-  currentInterim?: string | null;
+  currentInterim?: { text: string; translation?: string } | null;
 }
 
 export default function TranscriptView({ transcripts, currentInterim }: TranscriptViewProps) {
@@ -105,6 +105,11 @@ export default function TranscriptView({ transcripts, currentInterim }: Transcri
                 <p className="text-lg leading-relaxed text-gray-900 dark:text-white font-medium">
                   {transcript.text}
                 </p>
+                {transcript.translation && (
+                  <p className="mt-2 text-base leading-relaxed text-blue-700 dark:text-blue-300 italic">
+                    🌐 {transcript.translation}
+                  </p>
+                )}
                 {transcript.confidence && (
                   <div className="mt-2 text-xs text-gray-500">
                     신뢰도: {(transcript.confidence * 100).toFixed(0)}%
@@ -122,8 +127,13 @@ export default function TranscriptView({ transcripts, currentInterim }: Transcri
                   </span>
                 </div>
                 <p className="text-lg leading-relaxed text-gray-900 dark:text-white font-medium">
-                  {currentInterim}
+                  {currentInterim.text}
                 </p>
+                {currentInterim.translation && (
+                  <p className="mt-2 text-base leading-relaxed text-blue-700 dark:text-blue-300 italic">
+                    🌐 {currentInterim.translation}
+                  </p>
+                )}
               </div>
             )}
           </>
