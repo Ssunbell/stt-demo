@@ -151,6 +151,7 @@ export default function AudioRecorder({
             const transcript: TranscriptItem & { latencyMs: number } = {
               id: `${data.timestamp}-${Math.random()}`,
               text: data.transcript,
+              translation: data.translation,
               isFinal: data.is_final,
               timestamp: data.timestamp,
               confidence: data.confidence,
@@ -236,9 +237,9 @@ export default function AudioRecorder({
       
       const source = audioContext.createMediaStreamSource(stream);
       
-      // Create ScriptProcessor with buffer size adjusted for resampling
-      // Use larger buffer (4096) to ensure smooth resampling
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      // Create ScriptProcessor with smaller buffer for faster response
+      // 2048 samples ≈ 42ms at 48kHz (browser default)
+      const processor = audioContext.createScriptProcessor(2048, 1, 1);
       
       let audioChunkCount = 0;
       let firstChunk = true;
