@@ -7,6 +7,10 @@ import queue
 import time
 from fastapi import WebSocket, WebSocketDisconnect, APIRouter
 from stt_service import STTStreamingService
+from stt_service_v1 import STTStreamingServiceV1
+from translation_service import TranslationService
+from stt_service_multimodal import MultimodalSTTService
+from stt_service_gemini_live import GeminiLiveSTTService
 
 # Create router
 router = APIRouter()
@@ -195,3 +199,184 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         except Exception:
             pass
         print("👋 WebSocket connection closed")
+
+
+@router.websocket("/ws/stt-translate")
+async def websocket_stt_translate_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time speech-to-text with translation.
+
+    Client sends: Binary audio chunks (16kHz, mono, LINEAR16)
+    Server sends: JSON with transcription and translation results
+
+    Message format from server:
+    {
+        "type": "transcript",
+        "transcript": "recognized Korean text",
+        "translation": "translated English text",
+        "is_final": true/false,
+        "timestamp": 12345,
+        "confidence": 0.95
+    }
+
+    or error:
+    {
+        "type": "error",
+        "message": "error description"
+    }
+    """
+    await websocket.accept()
+    print(f"\n{'*'*80}", flush=True)
+    print("✅ WebSocket client connected - 실시간 음성 인식 + 번역 시작", flush=True)
+    print(f"{'*'*80}\n", flush=True)
+
+    # Initialize services
+    stt_service = STTStreamingService()
+    translation_service = TranslationService()
+    audio_queue = queue.Queue()
+
+    # Connect to translation service
+    await translation_service.connect()
+
+    # Flag to control tasks
+    receiving = True
+
+    async def receive_audio():
+        """Receive audio chunks from client and put in queue."""
+        nonlocal receiving
+        chunk_count = 0
+        try:
+            while receiving:
+                data = await websocket.receive_bytes()
+
+                if data:
+                    audio_queue.put(data)
+                    chunk_count += 1
+                    if chunk_count % 20 == 0:
+                        print(
+                            f"🎵 Received {chunk_count} audio chunks ({len(data)} bytes)",
+                            flush=True,
+                        )
+                else:
+                    audio_queue.put(None)
+                    break
+
+        except WebSocketDisconnect:
+            print("🔌 Client disconnected")
+            receiving = False
+            audio_queue.put(None)
+        except Exception as e:
+            print(f"❌ Error receiving audio: {e}")
+            receiving = False
+            audio_queue.put(None)
+
+    async def send_transcripts_with_translation():
+        """Process audio through STT, translate, and send results to client."""
+        nonlocal stt_service
+        restart_count = 0
+        max_restarts = 100
+
+        while receiving and restart_count < max_restarts:
+            try:
+                print(f"\n🔄 Starting STT+Translation stream (session {restart_count + 1})")
+
+                async for result in stt_service.stream_recognize(audio_queue):
+                    if not receiving:
+                        break
+
+                    # Check if it's an error
+                    if "error" in result:
+                        error_msg = result.get("error", "")
+                        if "5 minutes" in error_msg or "Max duration" in error_msg:
+                            print(f"\n⚠️ Stream limit reached, will restart...")
+                            break
+
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": error_msg,
+                                "timestamp": result.get("timestamp", 0),
+                            }
+                        )
+                        continue
+
+                    is_final = result.get("is_final", False)
+                    transcript = result["transcript"]
+                    timestamp_str = time.strftime("%H:%M:%S")
+
+                    # Prepare base message
+                    message = {
+                        "type": "transcript",
+                        "transcript": transcript,
+                        "is_final": is_final,
+                        "timestamp": result["timestamp"],
+                    }
+
+                    if "confidence" in result:
+                        message["confidence"] = result["confidence"]
+
+                    # Translate both interim and final results
+                    if transcript.strip():
+                        translation = await translation_service.translate(transcript)
+                        if translation:
+                            message["translation"] = translation
+                            print(f"[{timestamp_str}] 🌐 번역: {transcript[:30]}... → {translation[:50]}...", flush=True)
+                        else:
+                            message["translation"] = "[Translation failed]"
+                    else:
+                        message["translation"] = ""
+
+                    # Send to client
+                    await websocket.send_json(message)
+
+                    marker = "✅" if is_final else "💬"
+                    status = "final+translated" if is_final else "interim"
+                    print(f"[{timestamp_str}] {marker} → 클라이언트 전송 ({status}): {transcript[:50]}", flush=True)
+
+                # Stream ended, check if we should restart
+                if receiving:
+                    restart_count += 1
+                    print(f"\n🔄 Restarting STT stream (attempt {restart_count})...")
+                    stt_service = STTStreamingService()
+                    await asyncio.sleep(0.1)
+
+            except Exception as e:
+                error_str = str(e)
+                print(f"❌ Error in send_transcripts_with_translation: {e}")
+
+                if "5 minutes" in error_str or "Max duration" in error_str:
+                    restart_count += 1
+                    print(f"\n🔄 Restarting after timeout (attempt {restart_count})...")
+                    stt_service = STTStreamingService()
+                    await asyncio.sleep(0.1)
+                    continue
+
+                if receiving:
+                    try:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": str(e),
+                            }
+                        )
+                    except Exception:
+                        pass
+                break
+
+    # Run both tasks concurrently
+    try:
+        await asyncio.gather(
+            receive_audio(),
+            send_transcripts_with_translation(),
+        )
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+    finally:
+        receiving = False
+        await translation_service.disconnect()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        print("👋 WebSocket connection closed (STT+Translation)")
+

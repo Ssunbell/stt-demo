@@ -34,7 +34,7 @@ if __name__ == "__main__":
         f"""
     🚀 Starting Real-time STT Service
     📍 Server: http://{HOST}:{PORT}
-    🔌 WebSocket: ws://{HOST}:{PORT}/ws/stt
+    🔌 WebSocket (STT V2 - Chirp): ws://{HOST}:{PORT}/ws/stt
     🌍 CORS Origins: {CORS_ORIGINS}
     """
     )

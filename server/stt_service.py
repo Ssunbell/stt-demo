@@ -29,12 +29,12 @@ MODEL = os.getenv(
 # Audio settings
 # Sample rate for STT - must match client (Google recommends 16kHz or higher)
 INPUT_SAMPLE_RATE = 16000
-# 100ms frame size (Google recommended for optimal latency/efficiency balance)
-CHUNK_SIZE = int(INPUT_SAMPLE_RATE / 10)  # 1600 samples = 100ms at 16kHz
+# 50ms frame size for faster interim results
+CHUNK_SIZE = int(INPUT_SAMPLE_RATE / 20)  # 800 samples = 50ms at 16kHz
 STREAMING_LIMIT = 240000  # 4 minutes in milliseconds
 
-# Language settings
-LANGUAGE_CODES = ["ko-KR"]  # Default to Korean
+# Language settings (asia-northeast1 only supports single language)
+LANGUAGE_CODES = ["ko-KR"]  # Korean only (multi-language requires us/eu/global)
 
 # Google Cloud credentials
 CREDENTIALS_PATH = os.getenv(
@@ -55,19 +55,30 @@ class STTStreamingService:
     """
     Google Cloud Speech-to-Text v2 Streaming Service
     """
+    
+    # Class-level executor for reuse across streams
+    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    
+    # Singleton client for connection reuse (avoids gRPC handshake overhead)
+    _client = None
+    _recognizer = None
+
+    @classmethod
+    def _get_client(cls):
+        """Get or create singleton SpeechClient for connection reuse."""
+        if cls._client is None:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
+            cls._client = SpeechClient(
+                client_options=ClientOptions(api_endpoint=API_ENDPOINT)
+            )
+            cls._recognizer = cls._client.recognizer_path(PROJECT_ID, LOCATION, "_")
+            print("🔌 Created singleton SpeechClient (connection reuse enabled)")
+        return cls._client, cls._recognizer
 
     def __init__(self):
         """Initialize the STT service with Google Cloud credentials."""
-        # Set credentials
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
-
-        # Initialize client with regional endpoint
-        self.client = SpeechClient(
-            client_options=ClientOptions(api_endpoint=API_ENDPOINT)
-        )
-
-        # Create recognizer path
-        self.recognizer = self.client.recognizer_path(PROJECT_ID, LOCATION, "_")
+        # Use singleton client for connection reuse
+        self.client, self.recognizer = self._get_client()
 
         # Session tracking
         self.start_time = get_current_time()
@@ -144,8 +155,8 @@ class STTStreamingService:
             empty_count = 0
             while True:
                 try:
-                    # Get audio chunk from queue (non-blocking with timeout)
-                    audio_chunk = audio_queue.get(timeout=0.05)
+                    # Get audio chunk from queue (reduced timeout for lower latency)
+                    audio_chunk = audio_queue.get(timeout=0.01)
 
                     if audio_chunk is None:
                         # None signals end of stream
@@ -153,7 +164,7 @@ class STTStreamingService:
                         break
 
                     chunk_count += 1
-                    # Log every 20 chunks for better visibility
+                    # Log every 20 chunks for visibility
                     if chunk_count % 20 == 0:
                         print(
                             f"📤 Sent {chunk_count} audio chunks to Google Cloud",
@@ -165,11 +176,11 @@ class STTStreamingService:
                     )
 
                 except queue.Empty:
-                    # Continue waiting for more audio
+                    # Continue waiting for more audio (less frequent logging)
                     empty_count += 1
-                    if empty_count % 100 == 0:
+                    if empty_count % 500 == 0:
                         print(
-                            f"⏸️ Queue empty for {empty_count * 0.1:.1f}s, waiting for audio..."
+                            f"⏸️ Queue empty for {empty_count * 0.01:.1f}s, waiting for audio..."
                         )
                     continue
 
@@ -237,9 +248,8 @@ class STTStreamingService:
                     # Always signal completion
                     asyncio.run_coroutine_threadsafe(response_queue.put(None), loop)
 
-            # Start processing in background thread
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            executor.submit(process_responses)
+            # Start processing in background thread (reuse class executor)
+            self._executor.submit(process_responses)
 
             # Process responses as they arrive
             while True:
