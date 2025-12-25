@@ -101,13 +101,26 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         nonlocal stt_service
         restart_count = 0
         max_restarts = 100  # Allow up to 100 restarts (500 minutes total)
+        audio_received_in_session = False  # Track if we received audio in current session
+        stop_event = asyncio.Event()  # Used to stop generator on restart
         
         while receiving and restart_count < max_restarts:
             try:
+                # Wait for first audio chunk before starting Google Cloud stream
+                print(f"\n⏳ 오디오 대기 중... (session {restart_count + 1})")
+                while receiving and audio_queue.empty():
+                    await asyncio.sleep(0.1)
+                
+                if not receiving:
+                    break
+                    
+                audio_received_in_session = True
+                stop_event.clear()
                 print(f"\n🔄 Starting STT stream (session {restart_count + 1})")
                 
-                async for result in stt_service.stream_recognize(audio_queue):
+                async for result in stt_service.stream_recognize(audio_queue, stop_event):
                     if not receiving:
+                        stop_event.set()
                         break
 
                     # Check if it's an error
@@ -150,16 +163,32 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                     status = "final" if is_final else "interim"
                     print(f"[{timestamp_str}] {marker} → 클라이언트 전송 ({status}): {result['transcript'][:50]}", flush=True)
 
-                # Stream ended, check if we should restart
-                if receiving:
+                # Stream ended - only restart if we had actual audio (4-min limit case)
+                # Don't restart on timeout due to no audio
+                if receiving and not audio_queue.empty():
                     restart_count += 1
                     print(f"\n🔄 Restarting STT stream (attempt {restart_count})...")
                     stt_service = STTStreamingService()  # Create new service instance
+                    audio_received_in_session = False
                     await asyncio.sleep(0.1)  # Brief pause before restart
+                elif receiving:
+                    # No audio in queue - go back to waiting mode instead of restarting
+                    print(f"\n⏸️ STT 스트림 종료 - 오디오 대기 모드로 전환")
+                    audio_received_in_session = False
+                    # Don't increment restart_count, just loop back to wait for audio
+                    stt_service = STTStreamingService()
                     
             except Exception as e:
                 error_str = str(e)
                 print(f"❌ Error in send_transcripts: {e}")
+                
+                # Check if it's a timeout error (no audio case)
+                if "409" in error_str or "timed out" in error_str.lower():
+                    # Don't restart on timeout - go back to waiting mode
+                    print(f"\n⏸️ 타임아웃 - 오디오 대기 모드로 전환")
+                    stt_service = STTStreamingService()
+                    audio_received_in_session = False
+                    continue
                 
                 # Check if it's a restart-able error
                 if "5 minutes" in error_str or "Max duration" in error_str:
@@ -272,13 +301,26 @@ async def websocket_stt_translate_endpoint(websocket: WebSocket):
         nonlocal stt_service
         restart_count = 0
         max_restarts = 100
+        audio_received_in_session = False
+        stop_event = asyncio.Event()
 
         while receiving and restart_count < max_restarts:
             try:
+                # Wait for first audio chunk before starting Google Cloud stream
+                print(f"\n⏳ 오디오 대기 중... (session {restart_count + 1})")
+                while receiving and audio_queue.empty():
+                    await asyncio.sleep(0.1)
+                
+                if not receiving:
+                    break
+                    
+                audio_received_in_session = True
+                stop_event.clear()
                 print(f"\n🔄 Starting STT+Translation stream (session {restart_count + 1})")
 
-                async for result in stt_service.stream_recognize(audio_queue):
+                async for result in stt_service.stream_recognize(audio_queue, stop_event):
                     if not receiving:
+                        stop_event.set()
                         break
 
                     # Check if it's an error
@@ -330,16 +372,29 @@ async def websocket_stt_translate_endpoint(websocket: WebSocket):
                     status = "final+translated" if is_final else "interim"
                     print(f"[{timestamp_str}] {marker} → 클라이언트 전송 ({status}): {transcript[:50]}", flush=True)
 
-                # Stream ended, check if we should restart
-                if receiving:
+                # Stream ended - only restart if we had actual audio (4-min limit case)
+                if receiving and not audio_queue.empty():
                     restart_count += 1
                     print(f"\n🔄 Restarting STT stream (attempt {restart_count})...")
                     stt_service = STTStreamingService()
+                    audio_received_in_session = False
                     await asyncio.sleep(0.1)
+                elif receiving:
+                    # No audio in queue - go back to waiting mode
+                    print(f"\n⏸️ STT 스트림 종료 - 오디오 대기 모드로 전환")
+                    audio_received_in_session = False
+                    stt_service = STTStreamingService()
 
             except Exception as e:
                 error_str = str(e)
                 print(f"❌ Error in send_transcripts_with_translation: {e}")
+
+                # Check if it's a timeout error (no audio case)
+                if "409" in error_str or "timed out" in error_str.lower():
+                    print(f"\n⏸️ 타임아웃 - 오디오 대기 모드로 전환")
+                    stt_service = STTStreamingService()
+                    audio_received_in_session = False
+                    continue
 
                 if "5 minutes" in error_str or "Max duration" in error_str:
                     restart_count += 1

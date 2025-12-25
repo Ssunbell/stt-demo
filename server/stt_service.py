@@ -134,6 +134,7 @@ class STTStreamingService:
         self,
         config_request: cloud_speech_types.StreamingRecognizeRequest,
         audio_queue: queue.Queue,
+        stop_event: Optional[asyncio.Event] = None,
     ):
         """
         Generator that yields config first, then audio requests.
@@ -141,6 +142,7 @@ class STTStreamingService:
         Args:
             config_request: Initial configuration request
             audio_queue: Queue containing audio chunks
+            stop_event: Event to signal generator to stop
 
         Yields:
             StreamingRecognizeRequest objects
@@ -154,6 +156,11 @@ class STTStreamingService:
             chunk_count = 0
             empty_count = 0
             while True:
+                # Check stop event
+                if stop_event and stop_event.is_set():
+                    print(f"🛑 Stop signal received (sent {chunk_count} chunks)")
+                    break
+                    
                 try:
                     # Get audio chunk from queue (reduced timeout for lower latency)
                     audio_chunk = audio_queue.get(timeout=0.01)
@@ -164,6 +171,7 @@ class STTStreamingService:
                         break
 
                     chunk_count += 1
+                    empty_count = 0  # Reset when audio received
                     # Log every 20 chunks for visibility
                     if chunk_count % 20 == 0:
                         print(
@@ -189,7 +197,7 @@ class STTStreamingService:
             raise
 
     async def stream_recognize(
-        self, audio_queue: queue.Queue
+        self, audio_queue: queue.Queue, stop_event: Optional[asyncio.Event] = None
     ) -> AsyncGenerator[dict, None]:
         """
         Stream audio to Google STT API and yield transcription results.
@@ -210,7 +218,7 @@ class STTStreamingService:
         config_request = self._create_config_request()
 
         # Create requests generator
-        requests = self._requests_generator(config_request, audio_queue)
+        requests = self._requests_generator(config_request, audio_queue, stop_event)
 
         try:
             # Start streaming recognition (blocking call, run in executor)
@@ -251,11 +259,25 @@ class STTStreamingService:
             # Start processing in background thread (reuse class executor)
             self._executor.submit(process_responses)
 
+            # Track last interim for disconnect handling
+            last_interim_transcript = None
+            last_interim_time = 0
+
             # Process responses as they arrive
             while True:
                 response = await response_queue.get()
 
                 if response is None:
+                    # Stream ended - check if we have pending interim to return
+                    if last_interim_transcript:
+                        timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        print(f"[{timestamp}] 📝 Stream ended - 마지막 interim 반환: {last_interim_transcript}", flush=True)
+                        yield {
+                            "transcript": last_interim_transcript,
+                            "is_final": True,
+                            "timestamp": last_interim_time,
+                            "forced_final": True,  # Mark as forced due to disconnect
+                        }
                     break
                 # Check if we need to restart the stream (4-minute limit)
                 if get_current_time() - self.start_time > STREAMING_LIMIT:
@@ -299,6 +321,13 @@ class STTStreamingService:
                 print(f"[{timestamp}] {marker} 실시간 텍스트: {transcript}", flush=True)
 
                 self.last_transcript_was_final = result.is_final
+                
+                # Track interim for disconnect handling
+                if result.is_final:
+                    last_interim_transcript = None  # Clear on final
+                else:
+                    last_interim_transcript = transcript
+                    last_interim_time = corrected_time
 
                 # Yield immediately for real-time processing
                 yield result_data
