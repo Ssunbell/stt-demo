@@ -30,7 +30,7 @@ const initialLatencyStats: LatencyData = {
 
 export default function Home() {
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
-  const [currentInterim, setCurrentInterim] = useState<{ text: string; translation?: string } | null>(null);
+  const [currentInterim, setCurrentInterim] = useState<{ text: string; translation?: string; timestamp: number } | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [latencyStats, setLatencyStats] = useState<LatencyData>(initialLatencyStats);
@@ -69,8 +69,26 @@ export default function Home() {
       setTranscripts((prev) => [...prev, transcript]);
       setCurrentInterim(null);
     } else {
-      // Interim: update current interim text and translation
-      setCurrentInterim({ text: transcript.text, translation: transcript.translation });
+      // Interim: check if this is a new utterance (timestamp jumped significantly)
+      setCurrentInterim((prevInterim) => {
+        // If we have a previous interim and timestamp jumped by more than 500ms,
+        // it's likely a new utterance - save the old one as final
+        if (prevInterim && prevInterim.text && 
+            Math.abs(transcript.timestamp - prevInterim.timestamp) > 500) {
+          console.log(`📝 Timestamp jumped (${prevInterim.timestamp} → ${transcript.timestamp}), saving previous interim as final`);
+          // Save previous interim as final
+          const savedTranscript: TranscriptItem = {
+            id: `interim-saved-${prevInterim.timestamp}-${Math.random()}`,
+            text: prevInterim.text,
+            translation: prevInterim.translation,
+            isFinal: true,
+            timestamp: prevInterim.timestamp,
+          };
+          setTranscripts((prev) => [...prev, savedTranscript]);
+        }
+        // Update current interim with new data
+        return { text: transcript.text, translation: transcript.translation, timestamp: transcript.timestamp };
+      });
     }
   }, []);
 
